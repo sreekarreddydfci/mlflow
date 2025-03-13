@@ -719,7 +719,7 @@ class _OpenAIWrapper:
 
             return AzureOpenAI(
                 api_version=self.api_version,
-                azure_endpoint=self.endpoint,
+                azure_endpoint=self.api_config.api_base,
                 azure_ad_token_provider=token_provider,
             )
 
