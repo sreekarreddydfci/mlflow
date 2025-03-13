@@ -79,7 +79,7 @@ class _OAITokenHolder:
         self._azure_ad_token = None
         self._api_token_env = os.getenv("OPENAI_API_KEY") if not self._is_azure_ad else None
         self.entra_scope = os.getenv("AZURE_ENTRA_SCOPE")
-
+        print("API_TYPE is ", self._api_type)
         if not self._is_azure_ad and not self._api_token_env:
             raise mlflow.MlflowException(
                 "Missing OpenAI API key! Set it using `os.environ['OPENAI_API_KEY'] = 'your_key'`."
