@@ -3,6 +3,9 @@ import time
 from enum import Enum
 from typing import NamedTuple, Optional
 
+from azure.core.exceptions import ClientAuthenticationError
+from azure.identity import ClientSecretCredential
+
 import mlflow
 
 REQUEST_URL_CHAT = "https://api.openai.com/v1/chat/completions"
@@ -75,16 +78,31 @@ class _OAITokenHolder:
         self._is_azure_ad = api_type in ("azure_ad", "azuread")
         self._azure_ad_token = None
         self._api_token_env = os.environ.get("OPENAI_API_KEY")
+        self.entra_scope = os.environ.get("AZURE_ENTRA_SCOPE")
 
         if self._is_azure_ad and not self._api_token_env:
             try:
-                from azure.identity import DefaultAzureCredential
+                tenant_id = os.getenv("AZURE_TENANT_ID")
+                client_id = os.getenv("AZURE_CLIENT_ID")
+                client_secret = os.getenv("AZURE_CLIENT_SECRET")
+
+                if not all([tenant_id, client_id, client_secret]):
+                    raise mlflow.MlflowException(
+                        "Using API type `azure_ad` or `azuread` requires the environment "
+                        "variables `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_CLIENT_SECRET` "
+                        "to be set."
+                    )
+
+                self._credential = ClientSecretCredential(
+                    tenant_id=tenant_id,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                )
             except ImportError:
                 raise mlflow.MlflowException(
-                    "Using API type `azure_ad` or `azuread` requires the package"
-                    " `azure-identity` to be installed."
+                    "Using API type `azure_ad` or `azuread` requires the package "
+                    "`azure-identity` to be installed."
                 )
-            self._credential = DefaultAzureCredential()
 
     @property
     def token(self):
@@ -98,17 +116,13 @@ class _OAITokenHolder:
 
         if self._is_azure_ad:
             if not self._azure_ad_token or self._azure_ad_token.expires_on < time.time() + 60:
-                from azure.core.exceptions import ClientAuthenticationError
-
                 if logger:
                     logger.debug(
                         "Token for Azure AD is either expired or unset. Attempting to "
                         "acquire a new token."
                     )
                 try:
-                    self._azure_ad_token = self._credential.get_token(
-                        "https://cognitiveservices.azure.com/.default"
-                    )
+                    self._azure_ad_token = self._credential.get_token(self.entra_scope)
                 except ClientAuthenticationError as err:
                     raise mlflow.MlflowException(
                         "Unable to acquire a valid Azure AD token for the resource due to "
@@ -134,6 +148,10 @@ class _OpenAIApiConfig(NamedTuple):
     organization: Optional[str] = None
     max_retries: int = 5
     timeout: float = 60.0
+    tenant_id: Optional[str] = None
+    client_id: Optional[str] = None
+    client_secret: Optional[str] = None
+    entra_scope: Optional[str] = None  # NEW FIELD
 
 
 # See https://github.com/openai/openai-python/blob/cf03fe16a92cd01f2a8867537399c12e183ba58e/openai/__init__.py#L30-L38
@@ -147,9 +165,13 @@ class _OpenAIEnvVar(str, Enum):
     OPENAI_API_VERSION = "OPENAI_API_VERSION"
     OPENAI_ORGANIZATION = "OPENAI_ORGANIZATION"
     OPENAI_ENGINE = "OPENAI_ENGINE"
-    # use deployment_name instead of deployment_id to be
-    # consistent with gateway
     OPENAI_DEPLOYMENT_NAME = "OPENAI_DEPLOYMENT_NAME"
+
+    # Azure Credentials for authentication
+    AZURE_TENANT_ID = "AZURE_TENANT_ID"
+    AZURE_CLIENT_ID = "AZURE_CLIENT_ID"
+    AZURE_CLIENT_SECRET = "AZURE_CLIENT_SECRET"
+    AZURE_ENTRA_SCOPE = "AZURE_ENTRA_SCOPE"
 
     @property
     def secret_key(self):

@@ -96,22 +96,32 @@ class OpenAIDeploymentClient(BaseDeploymentClient):
 
         Returns:
             A dictionary containing the model outputs.
-
         """
         _check_openai_key()
 
         api_config = _get_api_config_without_openai_dep()
-        api_token = _OAITokenHolder(api_config.api_type)
+        api_token = _OAITokenHolder(api_config.api_type, api_config.entra_scope)
         api_token.refresh()
 
         if api_config.api_type in ("azure", "azure_ad", "azuread"):
+            from azure.identity import ClientSecretCredential, get_bearer_token_provider
             from openai import AzureOpenAI
 
+            credential = ClientSecretCredential(
+                tenant_id=api_config.tenant_id,
+                client_id=api_config.client_id,
+                client_secret=api_config.client_secret,
+            )
+
+            token_provider = get_bearer_token_provider(
+                credential,
+                api_config.entra_scope,
+            )
+
             client = AzureOpenAI(
-                api_key=api_token.token,
-                azure_endpoint=api_config.api_base,
                 api_version=api_config.api_version,
-                azure_deployment=api_config.deployment_id,
+                azure_endpoint=api_config.api_base,
+                azure_ad_token_provider=token_provider,
                 max_retries=api_config.max_retries,
                 timeout=api_config.timeout,
             )

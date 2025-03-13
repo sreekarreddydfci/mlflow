@@ -23,9 +23,9 @@ When this flavor logs a model on Databricks, it saves a YAML file with the follo
 
 - ``{scope}`` is the value of the ``MLFLOW_OPENAI_SECRET_SCOPE`` environment variable.
 - The keys are the environment variables that the ``openai-python`` package uses to
-  configure the API client.
+configure the API client.
 - The values are the references to the secrets that store the values of the environment
-  variables.
+variables.
 
 When the logged model is served on Databricks, each secret will be resolved and set as the
 corresponding environment variable. See https://docs.databricks.com/security/secrets/index.html
@@ -42,6 +42,10 @@ from string import Formatter
 from typing import Any, Optional
 
 import yaml
+from azure.identity import (
+    ClientSecretCredential,
+    get_bearer_token_provider,
+)
 from packaging.version import Version
 
 import mlflow
@@ -189,15 +193,26 @@ def _get_api_config() -> _OpenAIApiConfig:
     )
     deployment_id = os.getenv(_OpenAIEnvVar.OPENAI_DEPLOYMENT_NAME.value, None)
     organization = os.getenv(_OpenAIEnvVar.OPENAI_ORGANIZATION.value, None)
+
+    # Azure-specific configuration
     if api_type in ("azure", "azure_ad", "azuread"):
         batch_size = 16
         max_tokens_per_minute = 60_000
+
+        # Fetch credentials from environment variables
+        tenant_id = os.getenv("AZURE_TENANT_ID", None)
+        client_id = os.getenv("AZURE_CLIENT_ID", None)
+        client_secret = os.getenv("AZURE_CLIENT_SECRET", None)
+        entra_scope = os.getenv("AZURE_ENTRA_SCOPE", "https://cognitiveservices.azure.com/.default")
+
+        if not all([tenant_id, client_id, client_secret]):
+            raise ValueError("Azure authentication tenant,client and secret.")
+
     else:
-        # The maximum batch size is 2048:
-        # https://github.com/openai/openai-python/blob/b82a3f7e4c462a8a10fa445193301a3cefef9a4a/openai/embeddings_utils.py#L43
-        # We use a smaller batch size to be safe.
         batch_size = 1024
         max_tokens_per_minute = 90_000
+        tenant_id = client_id = client_secret = entra_scope = None  # Not needed for non-Azure cases
+
     return _OpenAIApiConfig(
         api_type=api_type,
         batch_size=batch_size,
@@ -207,6 +222,10 @@ def _get_api_config() -> _OpenAIApiConfig:
         api_version=api_version,
         deployment_id=deployment_id,
         organization=organization,
+        tenant_id=tenant_id,
+        client_id=client_id,
+        client_secret=client_secret,
+        entra_scope=entra_scope,
     )
 
 
@@ -677,14 +696,33 @@ class _OpenAIWrapper:
         if self.api_config.api_type in ("azure", "azure_ad", "azuread"):
             from openai import AzureOpenAI
 
-            return AzureOpenAI(
-                api_key=self.api_token.token,
-                azure_endpoint=self.api_config.api_base,
-                api_version=self.api_config.api_version,
-                azure_deployment=self.api_config.deployment_id,
-                max_retries=max_retries,
-                timeout=timeout,
+            # return AzureOpenAI(
+            #     api_key=self.api_token.token,
+            #     azure_endpoint=self.api_config.api_base,
+            #     api_version=self.api_config.api_version,
+            #     azure_deployment=self.api_config.deployment_id,
+            #     max_retries=max_retries,
+            #     timeout=timeout,
+            # )
+
+            credential = ClientSecretCredential(
+                tenant_id=self.api_config.tenant_id,
+                client_id=self.api_config.client_id,
+                client_secret=self.api_config.client_secret,
             )
+
+            # Obtain token provider
+            token_provider = get_bearer_token_provider(
+                credential,
+                self.api_config.entra_scope,
+            )
+
+            return AzureOpenAI(
+                api_version=self.api_version,
+                azure_endpoint=self.endpoint,
+                azure_ad_token_provider=token_provider,
+            )
+
         else:
             from openai import OpenAI
 
@@ -891,7 +929,9 @@ def autolog(
     if Version(_get_openai_package_version()).major < 1:
         raise MlflowException("OpenAI autologging is only supported for openai >= 1.0.0")
 
-    from openai.resources.chat.completions import AsyncCompletions as AsyncChatCompletions
+    from openai.resources.chat.completions import (
+        AsyncCompletions as AsyncChatCompletions,
+    )
     from openai.resources.chat.completions import Completions as ChatCompletions
     from openai.resources.completions import AsyncCompletions, Completions
     from openai.resources.embeddings import AsyncEmbeddings, Embeddings
