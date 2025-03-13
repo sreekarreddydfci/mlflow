@@ -75,12 +75,17 @@ class _OAITokenHolder:
     def __init__(self, api_type):
         self._credential = None
         self._api_type = api_type
-        self._is_azure_ad = api_type in ("azure_ad", "azuread")
+        self._is_azure_ad = api_type in ("azure", "azure_ad", "azuread")  # Allow "azure" as well
         self._azure_ad_token = None
-        self._api_token_env = os.environ.get("OPENAI_API_KEY")
-        self.entra_scope = os.environ.get("AZURE_ENTRA_SCOPE")
+        self._api_token_env = os.getenv("OPENAI_API_KEY") if not self._is_azure_ad else None
+        self.entra_scope = os.getenv("AZURE_ENTRA_SCOPE")
 
-        if self._is_azure_ad and not self._api_token_env:
+        if not self._is_azure_ad and not self._api_token_env:
+            raise mlflow.MlflowException(
+                "Missing OpenAI API key! Set it using `os.environ['OPENAI_API_KEY'] = 'your_key'`."
+            )
+
+        if self._is_azure_ad:
             try:
                 tenant_id = os.getenv("AZURE_TENANT_ID")
                 client_id = os.getenv("AZURE_CLIENT_ID")
@@ -88,9 +93,8 @@ class _OAITokenHolder:
 
                 if not all([tenant_id, client_id, client_secret]):
                     raise mlflow.MlflowException(
-                        "Using API type `azure_ad` or `azuread` requires the environment "
-                        "variables `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_CLIENT_SECRET` "
-                        "to be set."
+                        "For `azure_ad` API type, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, "
+                        "and `AZURE_CLIENT_SECRET` must be set."
                     )
 
                 self._credential = ClientSecretCredential(
@@ -100,41 +104,42 @@ class _OAITokenHolder:
                 )
             except ImportError:
                 raise mlflow.MlflowException(
-                    "Using API type `azure_ad` or `azuread` requires the package "
-                    "`azure-identity` to be installed."
+                    "Using API type `azure_ad` or `azure` requires the `azure-identity` package."
                 )
 
     @property
     def token(self):
-        return self._api_token_env or self._azure_ad_token.token
+        if self._is_azure_ad:
+            # print('Token',self._azure_ad_token.token)
+            return self._azure_ad_token.token if self._azure_ad_token else None
+        return self._api_token_env
 
     def refresh(self, logger=None):
-        """Validates the token or API key configured for accessing the OpenAI resource."""
-
-        if self._api_token_env is not None:
-            return
-
-        if self._is_azure_ad:
-            if not self._azure_ad_token or self._azure_ad_token.expires_on < time.time() + 60:
+        """Ensures the API key is available and valid only when required."""
+        if not self._is_azure_ad:
+            if self._api_token_env:
                 if logger:
-                    logger.debug(
-                        "Token for Azure AD is either expired or unset. Attempting to "
-                        "acquire a new token."
-                    )
-                try:
-                    self._azure_ad_token = self._credential.get_token(self.entra_scope)
-                except ClientAuthenticationError as err:
-                    raise mlflow.MlflowException(
-                        "Unable to acquire a valid Azure AD token for the resource due to "
-                        f"the following error: {err.message}"
-                    ) from err
+                    logger.debug("Using OpenAI API key from environment variable.")
+                return
+            else:
+                raise mlflow.MlflowException(
+                    "OpenAI API key must be set in the `OPENAI_API_KEY` environment variable."
+                )
+
+        # If using Azure, refresh the token when needed
+        if not self._azure_ad_token or self._azure_ad_token.expires_on < time.time() + 60:
+            if logger:
+                logger.debug("Azure AD token expired or unset. Refreshing.")
+            try:
+                self._azure_ad_token = self._credential.get_token(self.entra_scope)
+                # print(self._azure_ad_token)
+            except ClientAuthenticationError as err:
+                raise mlflow.MlflowException(
+                    f"Failed to get Azure AD token: {err.message}"
+                ) from err
 
             if logger:
-                logger.debug("Token refreshed successfully")
-        else:
-            raise mlflow.MlflowException(
-                "OpenAI API key must be set in the ``OPENAI_API_KEY`` environment variable."
-            )
+                logger.debug("Azure AD token refreshed successfully.")
 
 
 class _OpenAIApiConfig(NamedTuple):
